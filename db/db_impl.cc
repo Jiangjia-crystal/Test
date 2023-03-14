@@ -161,6 +161,7 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       read_in_nvm_btable_(0),
       read_in_nvm_imm_list_(0),
       read_in_acc_index_(0),
+      read_in_pop_table_(0),
       read_in_ssd_(0),
       logfile_(nullptr),
       logfile_number_(0),
@@ -189,12 +190,13 @@ DBImpl::~DBImpl() {
   Log(options_.info_log, "The read hit in nvm btable is:%d\n", read_in_nvm_btable_);
   Log(options_.info_log, "The read hit in nvm immlist is:%d\n", read_in_nvm_imm_list_);
   Log(options_.info_log, "The read hit in acc index is:%d\n", read_in_acc_index_);
+  Log(options_.info_log, "The read hit in pop_table is:%d\n", read_in_pop_table_);
   Log(options_.info_log, "The read hit in ssd is:%d\n", read_in_ssd_);
   // std::printf("interval stall time: %llu\n", interval_stall_time_);
   // std::printf("write btable time: %llu\n", write_btable_time_);
   // std::printf("wait lock time: %llu\n", wait_lock_time_);
-  std::printf("max nvm imm number: %llu\n", nvm_imm_number_);
-  std::printf("max big memtable size: %llu\n", nvm_btable_size_);
+  Log(options_.info_log, "max nvm imm number: %llu\n", nvm_imm_number_);
+  Log(options_.info_log, "max big memtable size: %llu\n", nvm_btable_size_);
   mutex_.Lock();
   shutting_down_.store(true, std::memory_order_release);
   while (background_compact_memtable_scheduled.load(std::memory_order_acquire)) {
@@ -905,7 +907,7 @@ void DBImpl::MaybeScheduleNVMImmutableMemTableCompaction() {
     // DB is being deleted; no more background compactions
   } else if (!bg_error_.ok()) {
     // Already got an error; no more changes
-  } else if (!acc_index_->Empty()) {  // test 3/7
+  } else if (!acc_index_->Empty() || acc_index_->HasPop()) {  // test 3/7
     env_->Schedule(&DBImpl::BGNVMImmutableMemTableCompactWork, this, 3);
     background_nvm_immutable_memtable_scheduled = true;
   }
@@ -922,14 +924,14 @@ void DBImpl::BackgroundCallImmutableMemTableCompact() {
   } else if (!bg_error_.ok()) {
     // No more background work after a background error.
   } else {
-    BackgroundCompactImmutableMemTable();
+    BackgroundCompactImmutableMemTable(); // 3/13 for test
   }
   background_nvm_immutable_memtable_scheduled = false;
 }
 
 void DBImpl::BackgroundCompactImmutableMemTable() {
   mutex_.AssertHeld();
-  while (!acc_index_->Empty()) // test by 3/6
+  while (!acc_index_->Empty() || acc_index_->HasPop()) // test by 3/6
   {
     if (imm_ != nullptr && !background_compact_memtable_scheduled.load(std::memory_order_consume)) {  // Add by JJia, 12/2
       background_compact_memtable_scheduled.store(true, std::memory_order_release);
@@ -942,7 +944,9 @@ void DBImpl::BackgroundCompactImmutableMemTable() {
     }
     // Add an operation to get the mutex.
     mutex_.Unlock();
-    acc_index_->RandomRemove();  // 3/6
+    if (!acc_index_->HasPop()) {
+      acc_index_->RandomRemove();  // 3/6
+    }
     STable* last = acc_index_->GetPopTable();  // 3/6
     // std::printf("popTable:%x\n", last);
     // last->Traversal();
@@ -1049,11 +1053,11 @@ void DBImpl::BackgroundInsertIntoAccIndex() {
   // std::printf("insertTable:\n");
   // insertTable->Traversal();
   STable* stable = imm_list_->Back();
-  std::printf("BeforeBackgroundInsertIntoAccIndex: Table:%x, head:%x\n", imm_list_->Back(), imm_list_->Back()->GetHead());
+  // std::printf("BeforeBackgroundInsertIntoAccIndex: Table:%x, head:%x\n", imm_list_->Back(), imm_list_->Back()->GetHead());
   // imm_list_->Back()->Traversal();
   
   acc_index_->Merge(imm_list_->Back());
-  std::printf("BackgroundInsertIntoAccIndex: Table:%x, head:%x\n", imm_list_->Back(), imm_list_->Back()->GetHead());
+  // std::printf("BackgroundInsertIntoAccIndex: Table:%x, head:%x\n", imm_list_->Back(), imm_list_->Back()->GetHead());
   // imm_list_->Back()->Traversal();
   // For test
   // Slice key = insertTable->GetSmallestInternalKey();
@@ -1109,7 +1113,7 @@ void DBImpl::BackgroundSplitBTable(BTable* b_mem, ImmutableSmallTableList* imm_l
   // For test 3/9
   // std::printf("nvm last push table:%x", imm_list->Front());
   // imm_list->Front()->Traversal();
-  std::printf("nvm imm number now is: %llu\n", imm_list->Num());
+  // std::printf("nvm imm number now is: %llu\n", imm_list->Num());
 }
 
 // The case of manual merging is not considered now, By JJia.
@@ -1236,6 +1240,13 @@ void DBImpl::WriteBTable(MemTable* mem, BTable* b_mem) {
   Iterator* iter = mem->NewIterator();
   BTable::Table::Node* start = b_mem->GetHead();
   for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+    /* Track the wrong key. 3/13
+    Slice interKey = iter->key();
+    Slice userKey = ExtractUserKey(interKey);
+    if (strcmp(userKey.ToString().data(), "XlVGXI1ZA7hnIdeb") == 0) {
+      std::printf("XlVGXI1ZA7hnIdeb insert to btable\n");
+    }
+    */
     const char* key = mem->getKey(iter);
     size_t encoded_len = mem->getEncodedLength(iter);
     // std::printf("insert_num is:%lld\n", insert_num_);
@@ -1688,6 +1699,15 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
       read_in_nvm_imm_list_++;
     } else if (!acc_index_->Empty() && acc_index_->Get(lkey, value, &s)) {
       read_in_acc_index_++;
+    } else if (acc_index->HasPop()) {
+      STable* stable = acc_index->GetPopTable();
+      if (stable != nullptr && stable->Get(lkey, value, &s)) {
+        read_in_pop_table_++;
+      } else { // need to search for SSTable.
+        s = current->Get(options, lkey, value, &stats);
+        if(s.ok()) read_in_ssd_++;
+        have_stat_update = true; // Write it down and use it in compaction.
+      }
     } else { // need to search for SSTable.
       s = current->Get(options, lkey, value, &stats);
       if(s.ok()) read_in_ssd_++;

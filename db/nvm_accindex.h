@@ -34,29 +34,43 @@ class  AccIndex{
 
   bool Get(const LookupKey& key, std::string* value, Status* s);
 
-  void Add(Slice key, STable* value);
+  // Add a stable into acc_index.
+  void Add(Slice& key, STable* value);
 
-  void Delete(Slice key);
+  // Delete a table that anchor key is key.
+  // void Delete(Slice key);
 
-  void Merge(STable*);
+  // Merge a table into acc_index.
+  void Merge(STable* splitTable);
 
+  // Merge a table with another node.
   bool MergeNode(AccIndexIterator* indexIt, STable* splitTable);
 
+  // acc_index is empty.
   bool Empty();
 
+  // check if poptable is not empty.
   bool HasPop();
 
+  // Get the popTable.
   STable* GetPopTable();
 
+  // Set popTable null.
   void SetPopTableNull();
 
+  // Choose a table in acc_index and set null.
   void RandomRemove();
 
+  // Return the num of tables in acc_index
   int Num();
 
-  STable* CreateSTable(void*);
+  STable* CreateSTable(void* head);
 
   STable* CreateSTable();
+
+  void TraversalAnchorKey();
+
+  void TraversalAll();
 
   struct KeyComparator {
     const InternalKeyComparator comparator;

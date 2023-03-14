@@ -181,14 +181,9 @@ void STable::Add(const char* key, size_t encoded_length) {
 }
 
 const char* STable::getKey(Iterator* iter) {
-  // For test 3/7
   STableIterator* stableIter = (STableIterator*) iter;
-  Slice internalKey = iter->key();
-  
-  if (strcmp(ExtractUserKey(internalKey).ToString().data(), "gNabDXpLenQlyl0j") == 0) {
-    std::printf("error\n");
-  }
-  
+  // For test 3/7
+  // Slice internalKey = iter->key();
   // std::printf("add a key to acc_index table:%s\n", ExtractUserKey(internalKey).ToString().data());
   return stableIter->iter_.key(); 
 }
@@ -204,7 +199,7 @@ size_t STable::getEncodedLength(Iterator* iter) const {
 }
 
 void STable::Traversal() {
-  std::printf("table %x's head is %x\n", this, GetHead());
+  // std::printf("table %x's head is %x\n", this, GetHead());
   Table::Iterator iter(&table_);
   iter.SeekToFirst();
   while (iter.Valid()) {
@@ -213,9 +208,11 @@ void STable::Traversal() {
     const char* key_ptr = GetVarint32Ptr(entry, entry + 5, &key_length);   //从entry中获取klength
     // 3/7 for test
     std::string userkey = Slice(key_ptr, key_length - 8).ToString();
-    if (strcmp(userkey.data(), "gNabDXpLenQlyl0j") == 0) {
-      std::printf("stop\n");
+    /*
+    if (strcmp(userkey.data(), "XlVGXI1ZA7hnIdeb") == 0) {
+      std::printf("XlVGXI1ZA7hnIdeb write into stable\n");
     }
+    */
     std::printf("key:%s\n", userkey.data());
     iter.NextInNVMSmallTable();
   }

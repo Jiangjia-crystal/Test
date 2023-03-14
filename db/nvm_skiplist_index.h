@@ -540,14 +540,14 @@ void* NVMSkipListIndex<Key, Comparator>::RandomRemove() {
   }
   */
   // delNode->Lock();
-  std::printf("delNode value:%x\n", delNode->value);
+  // std::printf("delNode value:%x\n", delNode->value);
   // stable = delNode->value;
   // std::printf("stable is:%x\n", stable);
   Delete(delNode->key);
   
   // delNode->value = nullptr;
   // delNode->Unlock();
-  std::printf("after delete delNode value:%x\n", delNode->value);
+  // std::printf("after delete delNode value:%x\n", delNode->value);
   num_.fetch_sub(1);
   assert(delNode->value != nullptr);
   return delNode->value;

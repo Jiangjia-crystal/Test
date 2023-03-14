@@ -9,6 +9,7 @@
 
 namespace leveldb {
 
+// Return the internal key (Slice).
 static Slice GetLengthPrefixedSlice(const char* data) {
   uint32_t len;
   const char* p = data;
@@ -26,9 +27,19 @@ int AccIndex::KeyComparator::operator()(const char* aptr,
   // Internal keys are encoded as length-prefixed strings.
   Slice a = GetLengthPrefixedSlice(aptr);
   Slice b = GetLengthPrefixedSlice(bptr);
-  return comparator.Compare(a, b);
+
+  Slice auserKey = ExtractUserKey(a);
+  Slice buserKey = ExtractUserKey(b);
+
+  std::string astring = auserKey.ToString();
+  std::string bstring = buserKey.ToString();
+  
+  return astring.compare(bstring);
+  
+  // return comparator.Compare(a, b);
 }
 
+// Return memkey (const char*) of a internal key (Slice).
 static const char* EncodeKey(std::string* scratch, const Slice& target) {
   scratch->clear();
   PutVarint32(scratch, target.size());
@@ -73,7 +84,7 @@ class AccIndexIterator {
 AccIndexIterator* AccIndex::NewIterator() { return new AccIndexIterator(&table_); }
 
 // Insert a new node into the AccIndex
-void AccIndex::Add(Slice key, STable* value) {
+void AccIndex::Add(Slice& key, STable* value) {
   // Convert Slice key to the type of internalkey (const char*)
   // MutexLock l(&acc_mutex_);
   std::string internalKey;
@@ -83,21 +94,23 @@ void AccIndex::Add(Slice key, STable* value) {
   char* key_memory = nsa_.AllocateNode(encodedLen);
   memcpy(key_memory, internalKey.data(), encodedLen);
   table_.Insert(key_memory, value);
-  std::printf("Add a table in accindex:%x\n", value);
+  // std::printf("Add a table in accindex:%x\n", value);
 }
 
 // Delete a node that has been popped.
+/*
 void AccIndex::Delete(Slice key) {
   MutexLock l(&acc_mutex_);
   std::string tmp;
   table_.Delete(EncodeKey(&tmp, key));                      
 }
+*/
 
 // Merge a table into the AccIndex.
 void AccIndex::Merge(STable* splitTable) {
   // S1:Lock the acc_index all the merge process(latest version).
-  acc_mutex_.Lock();  // 3/6
-  // MutexLock l(&acc_mutex_);
+  // acc_mutex_.Lock();  // 3/6
+  MutexLock l(&acc_mutex_);
   Slice smallestInsertKey = splitTable->GetSmallestInternalKey();
   /* For test3.7
   if (table_.Num() == 0) {
@@ -111,17 +124,18 @@ void AccIndex::Merge(STable* splitTable) {
   if (table_.Num() == 0) {
     if (pop_table_ == nullptr) {    
       pop_table_ = CreateSTable(splitTable->GetHead());
-      std::printf("directly push table %x's head %x in acc_index\n", pop_table_, pop_table_->GetHead());
-      std::printf("input table:\n");
+      // std::printf("directly push table %x's head %x in acc_index\n", pop_table_, pop_table_->GetHead());
+      // std::printf("input table:\n");
       // pop_table_->Traversal();  // test 3/7
     } 
     else {
       STable* insertTable = CreateSTable(splitTable->GetHead());
       Add(smallestInsertKey, insertTable);
-      std::printf("directly add table %x's head %x to acc_index\n", insertTable, insertTable->GetHead());
+      // std::printf("directly add table %x's head %x to acc_index\n", insertTable, insertTable->GetHead());
+      // std::printf("insertTable:\n");
       // insertTable->Traversal();
     }
-    acc_mutex_.Unlock();  // 3/6
+    // acc_mutex_.Unlock();  // 3/6
     return;
   }
   // S3:If the acc_index is not empty, find the merge start location(table).
@@ -132,17 +146,17 @@ void AccIndex::Merge(STable* splitTable) {
   if (!indexIt->Valid()) {
     STable* insertTable = CreateSTable();
     Add(smallestInsertKey, insertTable);
-    std::printf("add table %x's head %x to acc_index\n", insertTable, insertTable->GetHead());
+    // std::printf("add table %x's head %x to acc_index\n", insertTable, insertTable->GetHead());
   }
 
   // S5:Start Merge into acc_index.
   bool continueMerge = true;
-  std::printf("start merge:\n");
-  std::printf("table %x's head is %x\n", splitTable, splitTable->GetHead());
+  // std::printf("start merge:\n");
+  // std::printf("table %x's head is %x\n", splitTable, splitTable->GetHead());
   for (indexIt->SeekInsertNode(smallestInsertKey); indexIt->Valid() && continueMerge; indexIt->Next()) {
     continueMerge = MergeNode(indexIt, splitTable);
   }
-  acc_mutex_.Unlock();
+  // acc_mutex_.Unlock();
 }  
 
   /*
@@ -217,10 +231,16 @@ bool AccIndex::MergeNode(AccIndexIterator* indexIt, STable* splitTable) {
       }
       */
       insertKey = splitTableIt->key();
+      if (insertTable->comparator_.comparator.Compare(insertKey, stopKey) > 0) {
+        flag = true;
+        break;        
+      }
+      /*
       if (comparator_.comparator.Compare(insertKey, stopKey) > 0) {
         flag = true;
         break;
       }
+      */
       const char* key = splitTable->getKey(splitTableIt);
       size_t encoded_len = splitTable->getEncodedLength(splitTableIt);
       insertTable->Add(key, encoded_len);
@@ -246,6 +266,7 @@ bool AccIndex::MergeNode(AccIndexIterator* indexIt, STable* splitTable) {
 }
 
 STable* AccIndex::CreateSTable(void* head) {
+  // STable* insert_table = new STable(STable::KeyComparator::comparator);
   STable* insert_table = new STable(comparator_.comparator);
   insert_table->Ref();
   insert_table->table_.head_ = (STable::Table::Node*)head;
@@ -254,6 +275,7 @@ STable* AccIndex::CreateSTable(void* head) {
 }
 
 STable* AccIndex::CreateSTable() {
+  // STable* newTable = new STable(STable::KeyComparator::comparator);
   STable* newTable = new STable(comparator_.comparator);
   newTable->Ref();
   return newTable;
@@ -261,7 +283,8 @@ STable* AccIndex::CreateSTable() {
 
 bool AccIndex::Empty() {
   // MutexLock l(&acc_mutex_);
-  return (table_.Num() <= 0 && pop_table_ == nullptr);
+  // return (table_.Num() <= 0 && pop_table_ == nullptr);
+  return table_.Num() == 0;
 }
 
 bool AccIndex::HasPop() {
@@ -280,16 +303,10 @@ void AccIndex::SetPopTableNull() {
 }
 
 void AccIndex::RandomRemove() {
+  assert(pop_table_ == nullptr);
   MutexLock l(&acc_mutex_);
-  // For test
-  // 3/8
-  // std::printf("start:\n");
-  if (pop_table_ == nullptr) {
-    // std::printf("poptable is null\n");
-    pop_table_ = (STable*)(table_.RandomRemove());  // 3/6
-  }
-  // std::printf("the pop_table_ is %x\n", pop_table_);
-  // return pop_table_;
+  pop_table_ = (STable*)(table_.RandomRemove());  
+  // pop_table_->Traversal();
 }
 
 int AccIndex::Num() {
@@ -297,13 +314,57 @@ int AccIndex::Num() {
   return table_.Num();
 }
 
+void AccIndex::TraversalAnchorKey() {
+  std::printf("AccIndex traversal begin:\n");
+  Table::Iterator iter(&table_);
+  iter.SeekToFirst();
+  while(iter.Valid()) {
+    std::printf("anchor key:%s\n", ExtractUserKey(GetLengthPrefixedSlice(iter.key())).ToString().data());
+    iter.Next();
+  }
+}
+
+void AccIndex::TraversalAll() {
+  std::printf("AccIndex traversal all begin:\n");
+  Table::Iterator iter(&table_);
+  iter.SeekToFirst();
+  while(iter.Valid()) {
+    STable* tmp = (STable*)iter.value();
+    tmp->Traversal();
+    iter.Next();
+  }
+}
+
 bool AccIndex::Get(const LookupKey& key, std::string* value, Status* s) {
   Slice memkey = key.memtable_key();
   Table::Iterator iter(&table_);
+  // test
+  /*
+  Slice userkey = ExtractUserKey(key.internal_key());
+  if (strcmp(userkey.ToString().data(), "69ot0g4qVNzsn5d7") == 0) {
+    // std::printf("B9N1RZnRoFz63ZAo's anchor key is:%s\n", iter.key());
+    TraversalAnchorKey();
+    // std::printf("69ot0g4qVNzsn5d7's anchor key:%s\n", iter.key());
+    // TraversalAll();
+  }
+  */
+
   iter.SeekInsertNode(memkey.data());
+  // Test 3/13
+  /*
+  if (strcmp(userkey.ToString().data(), "B9N1RZnRoFz63ZAo") == 0) {
+    // std::printf("B9N1RZnRoFz63ZAo's anchor key is:%s\n", iter.key());
+    TraversalAnchorKey();
+    std::printf("B9N1RZnRoFz63ZAo's anchor key:%s\n", iter.key());
+    // TraversalAll();
+  }
+  */
+  /*
   if (!iter.Valid() && pop_table_ == nullptr) {  // 3.7
     return false;
   }
+  */
+
   if (iter.Valid()) {
     // entry format is:
     //    klength  varint32
@@ -315,20 +376,12 @@ bool AccIndex::Get(const LookupKey& key, std::string* value, Status* s) {
     // sequence number since the Seek() call above should have skipped
     // all entries with overly large sequence numbers.
     STable* target = (STable*)iter.value();
-    if (target == nullptr) {
-      return false;
-    }
-    else {
-      bool flag = target->Get(key, value, s);
-      // Find in the acc_index.
-      if (flag) {
-        return true;
-      }
-    }
+    return target->Get(key, value, s);
   }
+  else return false;
   // std::printf("popTable:\n");
   // pop_table_->Traversal();  // test 3/7
-  return pop_table_->Get(key, value, s);
+  // return pop_table_->Get(key, value, s);
 }
 /*
 bool AccIndex::MergeTable(STable* src, STable* dst, Slice& startKey, Slice nextSmallKey) {

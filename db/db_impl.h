@@ -232,6 +232,7 @@ class DBImpl : public DB {
   size_t read_in_nvm_btable_;
   size_t read_in_nvm_imm_list_;
   size_t read_in_acc_index_;
+  size_t read_in_pop_table_;
   size_t read_in_ssd_;
 
   uint64_t tmp_level0_number_;
