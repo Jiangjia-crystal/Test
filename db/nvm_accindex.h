@@ -39,12 +39,17 @@ class  AccIndex{
 
   // Delete a table that anchor key is key.
   // void Delete(Slice key);
+  size_t ApproximateMemoryUsage();
 
   // Merge a table into acc_index.
-  void Merge(STable* splitTable);
+  void Merge(STable* splitTable, SequenceNumber seq);
 
   // Merge a table with another node.
   bool MergeNode(AccIndexIterator* indexIt, STable* splitTable);
+
+  void MergeNode(STable* srcTable, STable* splitTable, const char* nextMemKey, SequenceNumber seq);
+
+  void MergeNode(STable* srcTable, STable* splitTable, SequenceNumber seq);
 
   // acc_index is empty.
   bool Empty();

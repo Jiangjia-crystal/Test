@@ -45,6 +45,8 @@ class ImmutableSmallTableList{
 
   size_t Num();
 
+  size_t ApproximateMemoryUsage();
+
   STable* CreateSTable(void*);
 
  private:
@@ -54,6 +56,7 @@ class ImmutableSmallTableList{
   port::Mutex imm_list_mutex_;
   InternalKeyComparator comparator_;
   std::list<STable*> SmallTableList_;
+  size_t nvm_usage_;
   // radix_tree<std::string, STable*> tree_;
 };
 

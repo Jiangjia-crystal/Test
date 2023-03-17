@@ -51,13 +51,13 @@ static const int kReadBytesPeriod = 1048576;
 // static size_t nvm_smallTable_Stall_num = 10;
 // static const size_t big_memtable_delay_size = 4LL * 1024 * 1024 * 1024;
 
-static const size_t big_memtable_stop_size = 8LL * 1024 * 1024 * 1024;
+static const size_t big_memtable_stop_size = 12LL * 1024 * 1024 * 1024;
 
 static size_t nvm_splitTable_limitSize = 64 * 1024 * 1024;                           
 
 static int max_nvm_small_table_num = big_memtable_stop_size/nvm_splitTable_limitSize;
 
-static int limit_nvm_small_table_nvm = 64;
+static int imm_list_table_max_num = 2;
 
 }  // namespace config
 
@@ -125,6 +125,10 @@ class InternalKeyComparator : public Comparator {
   explicit InternalKeyComparator(const Comparator* c) : user_comparator_(c) {}
   const char* Name() const override;
   int Compare(const Slice& a, const Slice& b) const override;
+
+  int NewCompare(const Slice& akey, const Slice& bkey, bool hasseq, const SequenceNumber snum) const;
+  bool NewCompare(const Slice& akey, const Slice& bkey) const;
+
   void FindShortestSeparator(std::string* start,
                              const Slice& limit) const override;
   void FindShortSuccessor(std::string* key) const override;

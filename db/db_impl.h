@@ -218,6 +218,7 @@ class DBImpl : public DB {
   port::CondVar logAndApply_finished_signal_;
   port::CondVar background_mem_compact_finished_signal_; // By JJia
   port::CondVar background_compact_ssd_finished_signal; //By JJia
+  port::CondVar background_imm_list_empty_signal_;
   MemTable* mem_;
   MemTable* imm_ GUARDED_BY(mutex_);  // Memtable being compacted
   BTable* big_mem_;  // By JJia

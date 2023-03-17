@@ -148,6 +148,7 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       background_mem_compact_finished_signal_(&mutex_),
       background_compact_ssd_finished_signal(&mutex_),
       logAndApply_finished_signal_(&mutex_),
+      background_imm_list_empty_signal_(&btable_mutex_),
       mem_(nullptr),
       imm_(nullptr),
       big_mem_(nullptr),
@@ -192,9 +193,7 @@ DBImpl::~DBImpl() {
   Log(options_.info_log, "The read hit in acc index is:%d\n", read_in_acc_index_);
   Log(options_.info_log, "The read hit in pop_table is:%d\n", read_in_pop_table_);
   Log(options_.info_log, "The read hit in ssd is:%d\n", read_in_ssd_);
-  // std::printf("interval stall time: %llu\n", interval_stall_time_);
-  // std::printf("write btable time: %llu\n", write_btable_time_);
-  // std::printf("wait lock time: %llu\n", wait_lock_time_);
+  
   Log(options_.info_log, "max nvm imm number: %llu\n", nvm_imm_number_);
   Log(options_.info_log, "max big memtable size: %llu\n", nvm_btable_size_);
   mutex_.Lock();
@@ -1055,14 +1054,24 @@ void DBImpl::BackgroundInsertIntoAccIndex() {
   STable* stable = imm_list_->Back();
   // std::printf("BeforeBackgroundInsertIntoAccIndex: Table:%x, head:%x\n", imm_list_->Back(), imm_list_->Back()->GetHead());
   // imm_list_->Back()->Traversal();
-  
-  acc_index_->Merge(imm_list_->Back());
+  // const uint64_t start_micros = env_->NowMicros();
+  acc_index_->Merge(imm_list_->Back(), versions_->LastSequence());
+  /*
+  const uint64_t wait_lock_time_ = env_->NowMicros();
+  std::printf("merge time:%llu\n", wait_lock_time_ - start_micros);
+  */
   // std::printf("BackgroundInsertIntoAccIndex: Table:%x, head:%x\n", imm_list_->Back(), imm_list_->Back()->GetHead());
   // imm_list_->Back()->Traversal();
   // For test
   // Slice key = insertTable->GetSmallestInternalKey();
-  // std::printf("acc_index table num is: %d\n", acc_index_->Num());
+  
   imm_list_->Pop();
+  /*
+  const uint64_t wait_pop_time_ = env_->NowMicros() - wait_lock_time_;
+  std::printf("wait pop time: %llu\n", wait_pop_time_);
+  std::printf("pop a table from imm_list: %llu\n", imm_list_->Num());
+  std::printf("acc_index table num is: %d\n", acc_index_->Num());
+  */
   // std::printf("just test\n");
   // std::printf("insertTable %x 's head is %x\n", insertTable, insertTable->GetHead());
 }
@@ -1075,7 +1084,8 @@ void DBImpl::MaybeScheduleBTableSplit() {
     // DB is being deleted; no more background compactions
   } else if (!bg_error_.ok()) {
     // Already got an error; no more changes
-  } else if (!big_mem_->NeedToSplit()) {
+  } // else if (!big_mem_->NeedToSplit()) { 
+    else if (!big_mem_->NeedToSplit() || imm_list_->Num() >= config::imm_list_table_max_num) {
     // No work to be done;
   } else {
     background_split_btable_scheduled_ = true;
@@ -1089,7 +1099,8 @@ void DBImpl::BGSplitBTable(void* db) {
 }
 
 void DBImpl::BackgroundCallSplitBTable() {
-  big_mem_->Lock();
+  // big_mem_->Lock();
+  btable_mutex_.Lock();
   if (shutting_down_.load(std::memory_order_acquire)) {
     // No more background work when shutting down.
   } else if (!bg_error_.ok()) {
@@ -1102,18 +1113,39 @@ void DBImpl::BackgroundCallSplitBTable() {
   // btable_mutex_.Unlock();
   // Log(options_.info_log, "Set mem_scheduled false, memCompaction is finished.\n");
   MaybeScheduleBTableSplit();
-  big_mem_->Unlock();
+  // big_mem_->Unlock();
+  btable_mutex_.Unlock();
   MaybeScheduleInsertIntoAccIndex(); // 3/6 test for keep only dram btable and immlist
   // MaybeScheduleNVMImmutableMemTableCompaction();
 }
 
 void DBImpl::BackgroundSplitBTable(BTable* b_mem, ImmutableSmallTableList* imm_list) {
   // S1: Split the BTable and mark the push table.
+  if (has_imm_.load(std::memory_order_relaxed) && !background_compact_memtable_scheduled.load(std::memory_order_consume)) {  // Add by JJia, 12/2
+    mutex_.Lock();
+    // big_mem_->Unlock(); // thread splitBTable unlock btable mutex for the compactMemTable work.
+    btable_mutex_.Unlock();
+    if (!background_compact_memtable_scheduled.load(std::memory_order_consume)) {
+      background_compact_memtable_scheduled.store(true, std::memory_order_release);
+      CompactMemTable();
+      // Log(options_.info_log, "DocompactionWork compact memtable finished...\n");
+      background_compact_memtable_scheduled.store(false, std::memory_order_release);
+      background_mem_compact_finished_signal_.SignalAll();
+      release_lock_time_ = env_->NowMicros();
+    }
+    // big_mem_->Lock();
+    btable_mutex_.Lock();
+    mutex_.Unlock();
+  }
+
+  // const uint64_t start_micros = env_->NowMicros();
   b_mem->Split(imm_list);
+  // const uint64_t wait_lock_time_ = env_->NowMicros() - start_micros;
+  // std::printf("split time:%llu\n", wait_lock_time_);
   // For test 3/9
   // std::printf("nvm last push table:%x", imm_list->Front());
   // imm_list->Front()->Traversal();
-  // std::printf("nvm imm number now is: %llu\n", imm_list->Num());
+  // std::printf("push a table into imm_list, nvm imm number now is: %llu\n", imm_list->Num());
 }
 
 // The case of manual merging is not considered now, By JJia.
@@ -1166,11 +1198,13 @@ void DBImpl::BackgroundCallMemCompact() {
   }
   */
   mutex_.Unlock();
-  big_mem_->Lock();
+  // big_mem_->Lock();
+  btable_mutex_.Lock();
   if (big_mem_->NeedToSplit()) {
     MaybeScheduleBTableSplit();
   }
-  big_mem_->Unlock();
+  // big_mem_->Unlock();
+  btable_mutex_.Unlock();
 }
 
 // By JJia
@@ -1183,9 +1217,11 @@ void DBImpl::CompactMemTable() {
   // base->Ref();
   mutex_.Unlock();
   {
-    big_mem_->Lock();
+    // big_mem_->Lock();
+    btable_mutex_.Lock();
     WriteBTable(imm_, big_mem_);
-    big_mem_->Unlock();
+    // big_mem_->Unlock();
+    btable_mutex_.Unlock();
   }
   // uint64_t finish_writebtable = env_->NowMicros();
   // write_btable_time_ = finish_writebtable - start_micros;
@@ -1424,7 +1460,6 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   bool has_current_user_key = false;
   SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
   while (input->Valid() && !shutting_down_.load(std::memory_order_acquire)) {
-
     if (has_imm_.load(std::memory_order_relaxed) && !background_compact_memtable_scheduled.load(std::memory_order_consume)) {  // Add by JJia, 12/2
       mutex_.Lock();
       if (!background_compact_memtable_scheduled.load(std::memory_order_consume)) {
@@ -1658,7 +1693,10 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
                    std::string* value) {
   Status s;
   // S1:Lock mutex to prevent concurrency. If option is specified, snapshot is attempted. Then increase the reference value of the memtable.
+  uint64_t start_micros = env_->NowMicros();
   MutexLock l(&mutex_);
+  // uint64_t get_lock_micros = env_->NowMicros();
+  // std::printf("get lock time:%llu\n", get_lock_micros - start_micros);
   SequenceNumber snapshot;
   if (options.snapshot != nullptr) {
     snapshot =
@@ -1689,28 +1727,41 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
     mutex_.Unlock();  // test by JJia 11/27
     // First look in the memtable, then in the immutable memtable (if any).
     LookupKey lkey(key, snapshot);
+    // start_micros = env_->NowMicros();
     if (mem->Get(lkey, value, &s)) {
+      // std::printf("mem get time%llu\n", env_->NowMicros() - start_micros);
       read_in_dram_mem_++;
     } else if (imm != nullptr && imm->Get(lkey, value, &s)) {
+      // std::printf("imm mem get time%llu\n", env_->NowMicros() - start_micros);
       read_in_dram_imm_++;
     } else if (big_mem != nullptr && big_mem->Get(lkey, value, &s)) {
+      // std::printf("big mem get time%llu\n", env_->NowMicros() - start_micros);
       read_in_nvm_btable_++;
     } else if (imm_list->Num() != 0 && imm_list->Get(lkey, value, &s)) {
+      // std::printf("imm list get time%llu\n", env_->NowMicros() - start_micros);
       read_in_nvm_imm_list_++;
     } else if (!acc_index_->Empty() && acc_index_->Get(lkey, value, &s)) {
+      // std::printf("acc index get time%llu\n", env_->NowMicros() - start_micros);
       read_in_acc_index_++;
     } else if (acc_index->HasPop()) {
       STable* stable = acc_index->GetPopTable();
       if (stable != nullptr && stable->Get(lkey, value, &s)) {
+        // std::printf("pop table get time%llu\n", env_->NowMicros() - start_micros);
         read_in_pop_table_++;
       } else { // need to search for SSTable.
         s = current->Get(options, lkey, value, &stats);
-        if(s.ok()) read_in_ssd_++;
+        if(s.ok()) {
+          // std::printf("ssd1 get time%llu\n", env_->NowMicros() - start_micros);
+          read_in_ssd_++;
+        }
         have_stat_update = true; // Write it down and use it in compaction.
       }
     } else { // need to search for SSTable.
       s = current->Get(options, lkey, value, &stats);
-      if(s.ok()) read_in_ssd_++;
+      if(s.ok()) {
+        // std::printf("ssd2 get time%llu\n", env_->NowMicros() - start_micros);
+        read_in_ssd_++;
+      }
       have_stat_update = true; // Write it down and use it in compaction.
     }
     /*
@@ -1927,7 +1978,7 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       // We have filled up the current memtable, but the previous
       // one is still being compacted, so we wait.
       Log(options_.info_log, "Current memtable full; waiting...\n");
-      const uint64_t start_micros = env_->NowMicros();
+      // const uint64_t start_micros = env_->NowMicros();
       background_mem_compact_finished_signal_.Wait();
 
       // interval_stall_time_ += (env_->NowMicros() - start_micros);

@@ -75,9 +75,25 @@ class NvmSkipList {
   // Returns true iff an entry that compares equal to key is in the list.
   bool Contains(const Key& key) const;
 
+  int NewCompare(const Node* a, const Node* b, bool hasseq, SequenceNumber snum) const;
+
+  bool NewCompare(const Node* a, const Node* b) const;
+
+  void PreNext(Node** pre, int height);
+
+  void Insert(NvmSkipList<Key, Comparator>::Node* n, Node** prev);
+
+  void DeleteNode(Node** pre, Node* n);
+
+  bool Compact(NvmSkipList<Key, Comparator>* list, Key nextKey, SequenceNumber snum);
+
+  bool Compact(NvmSkipList<Key, Comparator>* list, SequenceNumber snum);
+
   Node* GetHead();
 
   bool NeedToSplit(); // By JJia 2/12
+
+  std::atomic<Node*> insertingnode; // Add zero copy. 3/16
 
   // Iteration over the contents of a skip list
   class Iterator {
@@ -208,7 +224,7 @@ class NvmSkipList {
 // Implementation details follow
 template <typename Key, class Comparator>
 struct NvmSkipList<Key, Comparator>::Node {
-  explicit Node(const Key& k, bool c, size_t s, size_t n) : key(k), cont(c), s_size(s), encoded_size(n) {}
+  explicit Node(const Key& k, bool c, size_t s, size_t n, int h) : key(k), cont(c), s_size(s), encoded_size(n), height(h) {}
 
   Key const key;
 
@@ -220,6 +236,8 @@ struct NvmSkipList<Key, Comparator>::Node {
 
   // the encoded size of kv. By JJia
   size_t encoded_size;
+
+  int height;
 
   // Reload 
   bool operator<(const Node& N) const 
@@ -286,7 +304,7 @@ typename NvmSkipList<Key, Comparator>::Node* NvmSkipList<Key, Comparator>::NewNo
     const Key& key, int height, size_t encoded_size) {
   char* const node_memory = nsa_->AllocateNode(
       sizeof(Node) + sizeof(std::atomic<Node*>) * (height - 1));
-  return new (node_memory) Node(key, false, 0, encoded_size);
+  return new (node_memory) Node(key, false, 0, encoded_size, height);
 }
 
 template <typename Key, class Comparator>
@@ -315,6 +333,7 @@ inline void NvmSkipList<Key, Comparator>::Iterator::Next() {
 template <typename Key, class Comparator>
 inline void NvmSkipList<Key, Comparator>::Iterator::NextInNVMSmallTable() {
   assert(Valid());
+  // while (list_->insertingnode.load(std::memory_order_acquire) != nullptr);
   node_ = node_->NextInNVMSmallTable(0);
 }
 
@@ -343,6 +362,15 @@ inline void NvmSkipList<Key, Comparator>::Iterator::PrevInSmallTable() {
 template <typename Key, class Comparator>
 inline void NvmSkipList<Key, Comparator>::Iterator::Seek(const Key& target) {
   node_ = list_->FindGreaterOrEqual(target, list_->head_, nullptr);
+  // 3/16 zero copy
+  Node* tmp = list_->insertingnode.load(std::memory_order_acquire);
+  if (tmp != nullptr && !list_->KeyIsAfterNode(target, tmp)) {
+    if (node_ == nullptr) {
+      node_ = tmp;
+    } else if (list_->NewCompare(node_, tmp)) { // node_->key = ins->key && node_->snum < ins_snum
+      node_ = tmp;
+    }
+  }
 }
 
 template <typename Key, class Comparator>
@@ -456,6 +484,7 @@ void NvmSkipList<Key, Comparator>::SplitSmallTableToList(ImmutableSmallTableList
     {
       eprev[i]->SetNext(i, nullptr);
     }
+    newHead->s_size = b->s_size; // add 3/15 for recording the splitTable's size.
     imm_list->Push(newHead);
     for (int i = 0; i < kMaxHeight; i++)
     {
@@ -475,6 +504,7 @@ void NvmSkipList<Key, Comparator>::SplitSmallTableToList(ImmutableSmallTableList
       newHead->SetNext(i,b); 
     }
     // BTable* smallTable = CreateBTable(b);
+    newHead->s_size = b->s_size; // add 3/15 for recording the splitTable's size.
     imm_list->Push(newHead);
     for (int i = 0; i < kMaxHeight; i++)
     {
@@ -667,6 +697,7 @@ NvmSkipList<Key, Comparator>::NvmSkipList(Comparator cmp, NvmSimpleAllocator* ns
   for (int i = 0; i < kMaxHeight; i++) {
     head_->SetNext(i, nullptr);
   }
+  insertingnode.store(nullptr, std::memory_order_relaxed);
   // std::printf("initial head:%p\n", head_);
 }
 
@@ -847,6 +878,251 @@ bool NvmSkipList<Key, Comparator>::Contains(const Key& key) const {
   } else {
     return false;
   }
+}
+
+// Comparing node a with b use both key and sequence number
+template <typename Key, class Comparator>
+int NvmSkipList<Key, Comparator>::NewCompare(const Node* a, const Node* b, bool hasseq, SequenceNumber snum) const {
+  if (a == nullptr || b == nullptr) {
+    return 0;
+  } else {
+    return compare_.NewCompare(a->key, b->key, hasseq, snum);
+  }
+}
+
+template <typename Key, class Comparator>
+bool NvmSkipList<Key, Comparator>::NewCompare(const Node* a, const Node* b) const {
+  if (a == nullptr || b == nullptr) {
+    return false;
+  } else {
+    return compare_.NewCompare(a->key, b->key);
+  }
+}
+
+template <typename Key, class Comparator>
+void NvmSkipList<Key, Comparator>::PreNext(Node** pre, int height) {
+  Node* n = pre[0]->Next(0);
+  for (int level = 0; level < height; level++) {
+    if (pre[level]->NextInNVMSmallTable(level) == n) {
+      pre[level] = n;
+    } else {
+      break;
+    }
+  }
+}
+
+template <typename Key, class Comparator>
+void NvmSkipList<Key, Comparator>::Insert(NvmSkipList<Key, Comparator>::Node* n, Node** prev) {
+  Node* x = FindGreaterOrEqualInNVMSmallTable(n->key, prev);
+
+  assert(x == nullptr || !Equal(n->key, x->key));
+
+  int height = n->height;
+  if (height > GetMaxHeight()) {
+    for (int i = GetMaxHeight(); i < height; i++) {
+      prev[i] = head_;
+    }
+    max_height_.store(height, std::memory_order_relaxed);
+  }
+
+  for (int i = 0; i < height; i++) {
+    n->NoBarrier_SetNext(i, prev[i]->NoBarrier_Next_InSmallTable(i));
+    prev[i]->SetNext(i, n);
+  }
+}
+
+template <typename Key, class Comparator>
+void NvmSkipList<Key, Comparator>::DeleteNode(Node** pre, Node* n) {
+  for (int i = 0; i < n->height; i++) {
+    pre[i]->SetNext(i, n->NextInNVMSmallTable(i));
+  }
+}
+
+template <typename Key, class Comparator>
+bool NvmSkipList<Key, Comparator>::Compact(NvmSkipList<Key, Comparator>* list, Key nextKey, SequenceNumber snum) {
+  // S1: Initialization.
+  Node *x = list->head_->NextInNVMSmallTable(0);
+  Node *y, *ypre[kMaxHeight], *xpre[kMaxHeight];
+  for (int i = 0; i < kMaxHeight; i++) {
+    if (i < list->GetMaxHeight()) {
+      xpre[i] = list->head_;
+    } else {
+      xpre[i] = nullptr;
+    }
+  }
+
+  // bool first = true;
+  while (x != nullptr && compare_(x->key, nextKey) < 0) {
+    insertingnode.store(x, std::memory_order_release);
+    DeleteNode(xpre, x);
+    // std::printf("insert key:%s\n", x->key);
+    Insert(x, ypre);
+  
+    y = x;
+    PreNext(ypre, y->height);
+
+    // Set smallest
+    /*
+    if (first) {
+      if (smallest == nullptr || NewCompare(y, smallest, false, 0) == 0b01) {
+        smallest = y;
+      }
+      first = false;
+    }
+    */
+
+    // LargeTable duplication
+    while (y->NextInNVMSmallTable(0) != nullptr) {
+      int r = NewCompare(y, y->NextInNVMSmallTable(0), true, snum);
+      if (r == 0b0010) {
+        /*
+        for (int i = 0; i < GetMaxHeight(); i++) {
+          if (largest[i] = y->Next(0)) {
+            largest[i] = ypre[i];
+          } else {
+            break;
+          }
+        }
+        */
+        DeleteNode(ypre, y->NextInNVMSmallTable(0));
+      } else if ((r & 0b11) == 0b10) {
+        y = y->NextInNVMSmallTable(0);
+        PreNext(ypre, y->height);
+      } else {
+        break;
+      }
+    }
+
+    // Jump obsolescent node in small table
+    x = xpre[0]->NextInNVMSmallTable(0);
+    if (x == nullptr) {
+
+    } else {
+      bool flag = true;
+      int r;
+      do {
+        if (flag) {
+          r = NewCompare(insertingnode.load(std::memory_order_relaxed), x, true, snum);
+          flag = false;
+        } else {
+          r = NewCompare(xpre[0], x, true, snum);
+        }
+        if (r == 0b0010) {
+          PreNext(xpre, x->height);
+          x = x->NextInNVMSmallTable(0);
+        } else {
+          break;
+        }
+      } while (x != nullptr);
+    }
+  }
+  insertingnode.store(nullptr, std::memory_order_release);
+
+  // Set Largest
+  /*
+  for (int i = 0; i < GetMaxHeight(); i++) {
+    if (NewCompare(ypre[i], largest[i], false, 0) == 0b11) {
+      largest[i] = ypre[i];
+    }
+  }
+  */
+  
+  // arena_->ReceiveArena(list->arena_);
+  // list->arena_->SetTransfer();
+  return true;
+}
+
+template <typename Key, class Comparator>
+bool NvmSkipList<Key, Comparator>::Compact(NvmSkipList<Key, Comparator>* list, SequenceNumber snum) {
+  // S1: Initialization.
+  Node *x = list->head_->NextInNVMSmallTable(0);
+  Node *y, *ypre[kMaxHeight], *xpre[kMaxHeight];
+  for (int i = 0; i < kMaxHeight; i++) {
+    if (i < list->GetMaxHeight()) {
+      xpre[i] = list->head_;
+    } else {
+      xpre[i] = nullptr;
+    }
+  }
+
+  // bool first = true;
+  while (x != nullptr) {
+    insertingnode.store(x, std::memory_order_release);
+    DeleteNode(xpre, x);
+    Insert(x, ypre);
+  
+    y = x;
+    PreNext(ypre, y->height);
+
+    // Set smallest
+    /*
+    if (first) {
+      if (smallest == nullptr || NewCompare(y, smallest, false, 0) == 0b01) {
+        smallest = y;
+      }
+      first = false;
+    }
+    */
+
+    // LargeTable duplication
+    while (y->NextInNVMSmallTable(0) != nullptr) {
+      int r = NewCompare(y, y->NextInNVMSmallTable(0), true, snum);
+      if (r == 0b0010) {
+        /*
+        for (int i = 0; i < GetMaxHeight(); i++) {
+          if (largest[i] = y->Next(0)) {
+            largest[i] = ypre[i];
+          } else {
+            break;
+          }
+        }
+        */
+        DeleteNode(ypre, y->NextInNVMSmallTable(0));
+      } else if ((r & 0b11) == 0b10) {
+        y = y->NextInNVMSmallTable(0);
+        PreNext(ypre, y->height);
+      } else {
+        break;
+      }
+    }
+
+    // Jump obsolescent node in small table
+    x = xpre[0]->NextInNVMSmallTable(0);
+    if (x == nullptr) {
+
+    } else {
+      bool flag = true;
+      int r;
+      do {
+        if (flag) {
+          r = NewCompare(insertingnode.load(std::memory_order_relaxed), x, true, snum);
+          flag = false;
+        } else {
+          r = NewCompare(xpre[0], x, true, snum);
+        }
+        if (r == 0b0010) {
+          PreNext(xpre, x->height);
+          x = x->NextInNVMSmallTable(0);
+        } else {
+          break;
+        }
+      } while (x != nullptr);
+    }
+  }
+  insertingnode.store(nullptr, std::memory_order_release);
+
+  // Set Largest
+  /*
+  for (int i = 0; i < GetMaxHeight(); i++) {
+    if (NewCompare(ypre[i], largest[i], false, 0) == 0b11) {
+      largest[i] = ypre[i];
+    }
+  }
+  */
+  
+  // arena_->ReceiveArena(list->arena_);
+  // list->arena_->SetTransfer();
+  return true;
 }
 
 }  // namespace leveldb

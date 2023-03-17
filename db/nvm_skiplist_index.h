@@ -487,7 +487,7 @@ void NVMSkipListIndex<Key, Comparator>::Delete(const Key& key) {
   Node* prev[kMaxHeight];
   Node* x = FindGreaterOrEqual(key, prev);  
 
-  for (int i = x->height-1; i >= 0; i--) {
+  for (int i = x->height - 1; i >= 0; i--) {
     prev[i]->SetNext(i, x->Next(i)); //设置前继结点指向后继结点
   }
   // num_--;

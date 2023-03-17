@@ -38,6 +38,8 @@ class BTable {
     const InternalKeyComparator comparator;
     explicit KeyComparator(const InternalKeyComparator& c) : comparator(c) {}
     int operator()(const char* a, const char* b) const;
+    int NewCompare(const char* a, const char* b, bool hasseq, SequenceNumber snum) const;
+    bool NewCompare(const char* a, const char* b) const;
   };
 
   typedef NvmSkipList<const char*, KeyComparator> Table;

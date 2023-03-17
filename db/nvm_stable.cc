@@ -30,6 +30,20 @@ int STable::KeyComparator::operator()(const char* aptr,
   return comparator.Compare(a, b);
 }
 
+int STable::KeyComparator::NewCompare(const char* aptr,
+										 const char* bptr,
+										 const bool hasseq,
+										 const SequenceNumber snum) const {
+	Slice a = GetLengthPrefixedSlice(aptr);
+	Slice b = GetLengthPrefixedSlice(bptr);
+	return comparator.NewCompare(a, b, hasseq, snum);
+}
+bool STable::KeyComparator::NewCompare(const char* aptr, const char* bptr) const {
+  Slice a = GetLengthPrefixedSlice(aptr);
+  Slice b = GetLengthPrefixedSlice(bptr);
+  return comparator.NewCompare(a, b);
+}
+
 // Encode a suitable internal key target for "target" and return it.
 // Uses *scratch as scratch space, and the returned pointer will point
 // into this scratch space.
@@ -80,6 +94,9 @@ STable::Table::Node* STable::GetHead() {
   return table_.GetHead();
 }
 
+size_t STable::ApproximateMemoryUsage() {
+  return table_.nvm_usage_;
+}
 
 void STable::ChangeHead(Slice key) {
   table_.FindGreaterOrEqualInNVMSmallTable(key.data(), nullptr);
@@ -131,6 +148,20 @@ Slice STable::GetLargestInternalKey() {
   Slice smallkey = it->key();
   delete it;
   return smallkey;
+}
+
+const char* STable::GetSmallestMemKey() {
+  STableIterator* it = (STableIterator*)this->NewIterator();
+  it->SeekToFirst();
+  const char* res = it->iter_.key();
+  return res;
+}
+
+const char* STable::GetLargestMemKey() {
+  STableIterator* it = (STableIterator*)this->NewIterator();
+  it->SeekToLast();
+  const char* res = it->iter_.key();
+  return res;
 }
 
 bool STable::Get(const LookupKey& key, std::string* value, Status* s) {
@@ -216,6 +247,14 @@ void STable::Traversal() {
     std::printf("key:%s\n", userkey.data());
     iter.NextInNVMSmallTable();
   }
+}
+
+void STable::MergeNode(STable* splitTable, const char* nextKey, SequenceNumber seq) {
+  table_.Compact(&splitTable->table_, nextKey, seq);
+}
+
+void STable::MergeNode(STable* splitTable, SequenceNumber seq) {
+  table_.Compact(&splitTable->table_, seq);
 }
 
 }

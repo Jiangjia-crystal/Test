@@ -6,7 +6,7 @@
 namespace leveldb{
 
 ImmutableSmallTableList::ImmutableSmallTableList(const InternalKeyComparator& comparator)
-    :comparator_(comparator), refs_(0) {}
+    :comparator_(comparator), refs_(0), nvm_usage_(0) {}
 
 bool ImmutableSmallTableList::Get(const LookupKey& key, std::string* value, Status* s) {
   Slice memkey = key.memtable_key();
@@ -25,15 +25,17 @@ bool ImmutableSmallTableList::Get(const LookupKey& key, std::string* value, Stat
 void ImmutableSmallTableList::Push(void* node) {
   STable* insertTable = CreateSTable(node);
   // For test
-  Slice key = insertTable->GetSmallestInternalKey();
+  // Slice key = insertTable->GetSmallestInternalKey();
   MutexLock l(&imm_list_mutex_);
   SmallTableList_.emplace_front(insertTable);
+  nvm_usage_ += insertTable->ApproximateMemoryUsage();
 }
 
 void ImmutableSmallTableList::Pop() {
   MutexLock l(&imm_list_mutex_);
   STable* back_small_table = SmallTableList_.back();
   SmallTableList_.pop_back();
+  nvm_usage_ -= back_small_table->ApproximateMemoryUsage();
   back_small_table->Unref();
 }
 
@@ -53,6 +55,10 @@ STable* ImmutableSmallTableList::Back() {
 
 bool ImmutableSmallTableList::Empty() {
   return Num() == 0;
+}
+
+size_t ImmutableSmallTableList::ApproximateMemoryUsage() {
+  return nvm_usage_;
 }
 
 size_t ImmutableSmallTableList::Num() {
@@ -205,7 +211,8 @@ STable* ImmutableSmallTableList::CreateSTable(void* head) {
   STable* insert_table = new STable(comparator_);
   insert_table->Ref();
   insert_table->table_.head_ = (STable::Table::Node*)head;
-  insert_table->table_.max_height_.store(insert_table->table_.kMaxHeight, std::memory_order_relaxed); // maybe kmaxheight is not tree, influence the read performance
+  insert_table->table_.max_height_.store(insert_table->table_.kMaxHeight, std::memory_order_relaxed); // maybe kmaxheight is not true, influence the read performance
+  insert_table->table_.nvm_usage_ = insert_table->table_.head_->s_size;
   return insert_table;
 }
 

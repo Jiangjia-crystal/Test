@@ -31,6 +31,20 @@ int BTable::KeyComparator::operator()(const char* aptr,
   return comparator.Compare(a, b);
 }
 
+int BTable::KeyComparator::NewCompare(const char* aptr,
+										 const char* bptr,
+										 const bool hasseq,
+										 const SequenceNumber snum) const {
+	Slice a = GetLengthPrefixedSlice(aptr);
+	Slice b = GetLengthPrefixedSlice(bptr);
+	return comparator.NewCompare(a, b, hasseq, snum);
+}
+bool BTable::KeyComparator::NewCompare(const char* aptr, const char* bptr) const {
+  Slice a = GetLengthPrefixedSlice(aptr);
+  Slice b = GetLengthPrefixedSlice(bptr);
+  return comparator.NewCompare(a, b);
+}
+
 // Encode a suitable internal key target for "target" and return it.
 // Uses *scratch as scratch space, and the returned pointer will point
 // into this scratch space.

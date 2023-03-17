@@ -19,6 +19,8 @@ class STable {
     const InternalKeyComparator comparator;
     explicit KeyComparator(const InternalKeyComparator& c) : comparator(c) {}
     int operator()(const char* a, const char* b) const;
+    int NewCompare(const char* a, const char* b, bool hasseq, SequenceNumber snum) const;
+    bool NewCompare(const char* a, const char* b) const;
   };
   
   typedef NvmSkipList<const char*, KeyComparator> Table;
@@ -44,16 +46,16 @@ class STable {
   const char* getMemKey(Iterator* iter) const;
 
   Table::Node* GetHead(); 
-  
-  // Iterator* FindSplitLocation(Iterator* iter);
-
-  // std::string GetSmallestKey();
-
-  // std::string GetLargestKey();
 
   Slice GetSmallestInternalKey();
 
   Slice GetLargestInternalKey();
+
+  const char* GetSmallestMemKey();
+
+  const char* GetLargestMemKey();
+
+  size_t ApproximateMemoryUsage();
 
   // Slice GetLargestMemTableKey();
 
@@ -61,12 +63,15 @@ class STable {
 
   void Add(const char* key, size_t encoded_length);
 
-  const char* getKey(Iterator* iter) ;
+  const char* getKey(Iterator* iter);
 
   size_t getEncodedLength(Iterator* iter) const;
 
-  void Traversal() ; // For test 3/7
+  void Traversal(); // For test 3/7
   // Table::Node* GetSTableHead();
+  void MergeNode(STable*, const char*, SequenceNumber);
+
+  void MergeNode(STable*, SequenceNumber);
 
   ~STable();  
 
